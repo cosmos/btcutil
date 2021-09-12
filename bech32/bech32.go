@@ -9,6 +9,10 @@ import (
 	"strings"
 )
 
+// MaxLengthBIP173 is the maximum length of bech32-encoded address defined by
+// BIP-173.
+const MaxLengthBIP173 = 90
+
 // charset is the set of characters used in the data section of bech32 strings.
 // Note that this is ordered, such that for a given charset[i], i is the binary
 // value of the character.
@@ -135,18 +139,78 @@ func writeBech32Checksum(hrp string, data []byte, bldr *strings.Builder) {
 	}
 }
 
-// bech32VerifyChecksum verifies whether the bech32 string specified by the
-// provided hrp and payload data (encoded as 5 bits per element byte slice) has
-// the correct checksum suffix.
-//
-// Data MUST have more than 6 elements, otherwise this function panics.
+// VerifyChecksum verifies whether the bech32 string specified by the provided
+// hrp and payload data (encoded as 5 bits per element byte slice) are validated
+// by the given checksum.
 //
 // For more details on the checksum verification, please refer to BIP 173.
-func bech32VerifyChecksum(hrp string, data []byte) bool {
-	checksum := data[len(data)-6:]
-	values := data[:len(data)-6]
+func VerifyChecksum(hrp string, values []byte, checksum []byte) bool {
 	polymod := bech32Polymod(hrp, values, checksum)
 	return polymod == 1
+}
+
+// Normalize converts the uppercase letters to lowercase in string, because
+// Bech32 standard uses only the lowercase for of string for checksum calculation.
+// If conversion occurs during function call, `true` will be returned.
+//
+// Mixed case is NOT allowed.
+func Normalize(bech *string) (bool, error) {
+	// Only	ASCII characters between 33 and 126 are allowed.
+	var hasLower, hasUpper bool
+	for i := 0; i < len(*bech); i++ {
+		if (*bech)[i] < 33 || (*bech)[i] > 126 {
+			return false, ErrInvalidCharacter((*bech)[i])
+		}
+
+		// The characters must be either all lowercase or all uppercase. Testing
+		// directly with ascii codes is safe here, given the previous test.
+		hasLower = hasLower || ((*bech)[i] >= 97 && (*bech)[i] <= 122)
+		hasUpper = hasUpper || ((*bech)[i] >= 65 && (*bech)[i] <= 90)
+		if hasLower && hasUpper {
+			return false, ErrMixedCase{}
+		}
+	}
+
+	// Bech32 standard uses only the lowercase for of strings for checksum
+	// calculation.
+	if hasUpper {
+		*bech = strings.ToLower(*bech)
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// DecodeUnsafe decodes a bech32 encoded string, returning the human-readable
+// part, the data part (excluding the checksum) and the checksum.  This function
+// does NOT validate against the BIP-173 maximum length allowed for bech32 strings
+// and is meant for use in custom applications (such as lightning network payment
+// requests), NOT on-chain addresses.  This function assumes the given string
+// includes lowercase letters only, so if not, you should call Normalize first.
+//
+// Note that the returned data is 5-bit (base32) encoded and the human-readable
+// part will be lowercase.
+func DecodeUnsafe(bech string) (string, []byte, []byte, error) {
+	// The string is invalid if the last '1' is non-existent, it is the
+	// first character of the string (no human-readable part) or one of the
+	// last 6 characters of the string (since checksum cannot contain '1').
+	one := strings.LastIndexByte(bech, '1')
+	if one < 1 || one+7 > len(bech) {
+		return "", nil, nil, ErrInvalidSeparatorIndex(one)
+	}
+
+	// The human-readable part is everything before the last '1'.
+	hrp := bech[:one]
+	data := bech[one+1:]
+
+	// Each character corresponds to the byte with value of the index in
+	// 'charset'.
+	decoded, err := toBytes(data)
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	return hrp, decoded[:len(decoded)-6], decoded[len(decoded)-6:], nil
 }
 
 // DecodeNoLimit decodes a bech32 encoded string, returning the human-readable
@@ -164,61 +228,29 @@ func DecodeNoLimit(bech string) (string, []byte, error) {
 		return "", nil, ErrInvalidLength(len(bech))
 	}
 
-	// Only	ASCII characters between 33 and 126 are allowed.
-	var hasLower, hasUpper bool
-	for i := 0; i < len(bech); i++ {
-		if bech[i] < 33 || bech[i] > 126 {
-			return "", nil, ErrInvalidCharacter(bech[i])
-		}
-
-		// The characters must be either all lowercase or all uppercase. Testing
-		// directly with ascii codes is safe here, given the previous test.
-		hasLower = hasLower || (bech[i] >= 97 && bech[i] <= 122)
-		hasUpper = hasUpper || (bech[i] >= 65 && bech[i] <= 90)
-		if hasLower && hasUpper {
-			return "", nil, ErrMixedCase{}
-		}
+	_, err := Normalize(&bech)
+	if err != nil {
+		return "", nil, err
 	}
 
-	// Bech32 standard uses only the lowercase for of strings for checksum
-	// calculation.
-	if hasUpper {
-		bech = strings.ToLower(bech)
-	}
-
-	// The string is invalid if the last '1' is non-existent, it is the
-	// first character of the string (no human-readable part) or one of the
-	// last 6 characters of the string (since checksum cannot contain '1').
-	one := strings.LastIndexByte(bech, '1')
-	if one < 1 || one+7 > len(bech) {
-		return "", nil, ErrInvalidSeparatorIndex(one)
-	}
-
-	// The human-readable part is everything before the last '1'.
-	hrp := bech[:one]
-	data := bech[one+1:]
-
-	// Each character corresponds to the byte with value of the index in
-	// 'charset'.
-	decoded, err := toBytes(data)
+	hrp, values, checksum, err := DecodeUnsafe(bech)
 	if err != nil {
 		return "", nil, err
 	}
 
 	// Verify if the checksum (stored inside decoded[:]) is valid, given the
 	// previously decoded hrp.
-	if !bech32VerifyChecksum(hrp, decoded) {
+	if !VerifyChecksum(hrp, values, checksum) {
 		// Invalid checksum. Calculate what it should have been, so that the
 		// error contains this information.
 
-		// Extract the payload bytes and actual checksum in the string.
+		// Extract the actual checksum in the string.
 		actual := bech[len(bech)-6:]
-		payload := decoded[:len(decoded)-6]
 
 		// Calculate the expected checksum, given the hrp and payload data.
 		var expectedBldr strings.Builder
 		expectedBldr.Grow(6)
-		writeBech32Checksum(hrp, payload, &expectedBldr)
+		writeBech32Checksum(hrp, values, &expectedBldr)
 		expected := expectedBldr.String()
 
 		err = ErrInvalidChecksum{
@@ -229,7 +261,7 @@ func DecodeNoLimit(bech string) (string, []byte, error) {
 	}
 
 	// We exclude the last 6 bytes, which is the checksum.
-	return hrp, decoded[:len(decoded)-6], nil
+	return hrp, values, nil
 }
 
 // Decode decodes a bech32 encoded string, returning the human-readable part and
@@ -237,9 +269,9 @@ func DecodeNoLimit(bech string) (string, []byte, error) {
 //
 // Note that the returned data is 5-bit (base32) encoded and the human-readable
 // part will be lowercase.
-func Decode(bech string) (string, []byte, error) {
-	// The maximum allowed length for a bech32 string is 90.
-	if len(bech) > 90 {
+func Decode(bech string, limit int) (string, []byte, error) {
+	// The length of the string should not exceed the given limit.
+	if len(bech) > limit {
 		return "", nil, ErrInvalidLength(len(bech))
 	}
 
@@ -366,7 +398,7 @@ func EncodeFromBase256(hrp string, data []byte) (string, error) {
 // human-readable part (HRP) and base32-encoded data, converts that data to a
 // base256-encoded byte slice and returns it along with the lowercase HRP.
 func DecodeToBase256(bech string) (string, []byte, error) {
-	hrp, data, err := Decode(bech)
+	hrp, data, err := Decode(bech, MaxLengthBIP173)
 	if err != nil {
 		return "", nil, err
 	}

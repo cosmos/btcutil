@@ -53,7 +53,7 @@ func TestBech32(t *testing.T) {
 
 	for i, test := range tests {
 		str := test.str
-		hrp, decoded, err := Decode(str)
+		hrp, decoded, err := Decode(str, MaxLengthBIP173)
 		if test.expectedError != err {
 			t.Errorf("%d: expected decoding error %v "+
 				"instead got %v", i, test.expectedError, err)
@@ -79,7 +79,7 @@ func TestBech32(t *testing.T) {
 		// Flip a bit in the string an make sure it is caught.
 		pos := strings.LastIndexAny(str, "1")
 		flipped := str[:pos+1] + string((str[pos+1] ^ 1)) + str[pos+2:]
-		_, _, err = Decode(flipped)
+		_, _, err = Decode(flipped, MaxLengthBIP173)
 		if err == nil {
 			t.Error("expected decoding to fail")
 		}
@@ -150,7 +150,7 @@ func TestMixedCaseEncode(t *testing.T) {
 
 		// Ensure the decoding the expected lowercase encoding converted to all
 		// uppercase produces the lowercase HRP and original data.
-		gotHRP, gotData, err := Decode(strings.ToUpper(test.encoded))
+		gotHRP, gotData, err := Decode(strings.ToUpper(test.encoded), MaxLengthBIP173)
 		if err != nil {
 			t.Errorf("%q: unexpected decode error: %v", test.name, err)
 			continue
@@ -181,7 +181,7 @@ func TestCanDecodeUnlimtedBech32(t *testing.T) {
 	input := "11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq5kx0yd"
 
 	// Sanity check that an input of this length errors on regular Decode()
-	_, _, err := Decode(input)
+	_, _, err := Decode(input, MaxLengthBIP173)
 	if err == nil {
 		t.Fatalf("Test vector not appropriate")
 	}
@@ -401,7 +401,7 @@ func BenchmarkEncodeDecodeCycle(b *testing.B) {
 			b.Fatalf("failed to encode input: %v", err)
 		}
 
-		_, _, err = Decode(str)
+		_, _, err = Decode(str, MaxLengthBIP173)
 		if err != nil {
 			b.Fatalf("failed to decode string: %v", err)
 		}
@@ -562,6 +562,34 @@ func BenchmarkConvertBitsUp(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, err := ConvertBits(inputData, 8, 5, true)
+		if err != nil {
+			b.Fatalf("error converting bits: %v", err)
+		}
+	}
+}
+
+// BenchmarkDecodeUnsafe performs a benchmark for a decode cycle of a bech32
+// string without normalization and checksum validation.
+func BenchmarkDecodeUnsafe(b *testing.B) {
+	encoded := "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _, err := DecodeUnsafe(encoded)
+		if err != nil {
+			b.Fatalf("error converting bits: %v", err)
+		}
+	}
+}
+
+// BenchmarkDecode performs a benchmark for a decode cycle of a bech32 string
+// with normalization and checksum validation.
+func BenchmarkDecode(b *testing.B) {
+	encoded := "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, err := Decode(encoded, MaxLengthBIP173)
 		if err != nil {
 			b.Fatalf("error converting bits: %v", err)
 		}
